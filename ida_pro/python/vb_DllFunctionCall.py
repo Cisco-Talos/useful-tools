@@ -54,13 +54,18 @@
 
 import idaapi
 import idautils
+import ida_struct
+import idc
+import ida_bytes
+import ida_nalt
+import ida_funcs
 
 #   Print out dynamically loaded API
 def printAPI(data):
-    formatStr = '{0:25} {1}'
+    formatStr = "{0:25} {1}"
     for dll in sorted(data.keys()):
         for fn in sorted(data[dll]):
-            print formatStr.format(dll, fn)
+            print(formatStr.format(str(dll), str(fn)))
 
 #   Find the start of the function
 #   Expects ea to be the address of loc_XXXXXX
@@ -80,87 +85,88 @@ def defineFunction(ea):
     jzInstr = DecodePreviousInstruction(jmpInstr).ea
     orInstr = DecodePreviousInstruction(jzInstr).ea
     movInstr = DecodePreviousInstruction(orInstr).ea
-    if (GetMnem(jmpInstr) != 'jmp') and (GetMnem(jzInstr) != 'jz') and \
-        (GetMnem(orInstr) != 'or') and (GetMnem(movInstr) != 'mov'):
-        print '\t[!] Error: Unable to find function start address'
+    if (print_insn_mnem(jmpInstr) != 'jmp') and (print_insn_mnem(jzInstr) != 'jz') and \
+        (print_insn_mnem(orInstr) != 'or') and (print_insn_mnem(movInstr) != 'mov'):
+        print('\t[!] Error: Unable to find function start address')
 
-    if 0 == MakeFunction(movInstr):
-        print '\t[!] Error: Unable to define function at 0x{0:h}'.format(movInstr)
+    if 0 == add_func(movInstr):
+        print('\t[!] Error: Unable to define function at 0x{0:h}'.format(movInstr))
 
 
 def createDllFunctionCallStruct():
     #   Create DllFunctionCall argument sub structure
-    subStructId = AddStrucEx(-1, HANDLES_STRUCT_NAME, 0)
-    AddStrucMember(subStructId, 'hModule', 0x4, FF_DWRD | FF_DATA, -1, 4)
-    AddStrucMember(subStructId, 'fnAddress', 0x8, FF_DWRD | FF_DATA, -1, 4)
+    subStructId = idc.add_struc(-1, HANDLES_STRUCT_NAME, 0)
+    idc.add_struc_member(subStructId, 'hModule', 0x4, FF_DWORD | FF_DATA, -1, 4)
+    idc.add_struc_member(subStructId, 'fnAddress', 0x8, FF_DWORD | FF_DATA, -1, 4)
 
     #   Create DllFunctionCall argument structure
-    structId = AddStrucEx(-1, DLL_FUNCTION_CALL_STRUCT_NAME, 0)
-    AddStrucMember(structId, 'lpDllName', 0x0, FF_DWRD | FF_0OFF | FF_DATA,
+    structId = idc.add_struc(-1, DLL_FUNCTION_CALL_STRUCT_NAME, 0)
+    idc.add_struc_member(structId, 'lpDllName', 0x0, FF_DWORD | FF_0OFF | FF_DATA,
                     -1, 4)
-    AddStrucMember(structId, 'lpExportName', 0x4, FF_DWRD | FF_0OFF | FF_DATA,
+    idc.add_struc_member(structId, 'lpExportName', 0x4, FF_DWORD | FF_0OFF | FF_DATA,
                     -1, 4)
-    AddStrucMember(structId, 'sizeOfExportName', 0xA, FF_BYTE | FF_DATA, -1, 1)
-    AddStrucMember(structId, 'ptrHandles', 0xC, FF_DWRD | FF_0OFF | FF_DATA, -1, 4)
+    idc.add_struc_member(structId, 'sizeOfExportName', 0xA, FF_BYTE | FF_DATA, -1, 1)
+    idc.add_struc_member(structId, 'ptrHandles', 0xC, FF_DWORD | FF_0OFF | FF_DATA, -1, 4)
 
 
 DLL_FUNCTION_CALL_STRUCT_NAME = 'DllFunctionCallStruct'
+ida_bytes.FF_DWORD
 HANDLES_STRUCT_NAME = 'DynamicHandles'
 dynamicAPI = {}
 loadAPI = 0
 
-print "Starting..."
+print("Starting...")
 
 #   Check if struct exists, if not, create it
-structId = GetStrucIdByName(DLL_FUNCTION_CALL_STRUCT_NAME)
+structId = ida_struct.get_struc_id(DLL_FUNCTION_CALL_STRUCT_NAME)
 if BADADDR == structId:
-    print '\t[+] Structure "{0}" does not exist, creating structure...'.format(
-            DLL_FUNCTION_CALL_STRUCT_NAME)
+    print('\t[+] Structure "{0}" does not exist, creating structure...'.format(
+            DLL_FUNCTION_CALL_STRUCT_NAME))
     structId = createDllFunctionCallStruct()
 
-for xref in idautils.CodeRefsTo(LocByName('DllFunctionCall'), 1):
+for xref in idautils.CodeRefsTo(get_name_ea_simple('DllFunctionCall'), 1):
     instr =  xref
     prevInstr = DecodePreviousInstruction(xref).ea
     structInstr = DecodePreviousInstruction(prevInstr).ea
 
     #   The instruction should be push 0x????????
-    if GetMnem(structInstr) == 'push' and GetOpType(structInstr, 0) == 0x05:
+    if print_insn_mnem(structInstr) == 'push' and get_operand_type(structInstr, 0) == 0x05:
         #   Set the operand type to an offset
-        OpOff(structInstr, 0, 0)
+        op_plain_offset(structInstr, 0, 0)
 
         #   Get struct offset and apply structure to it
-        structOffset = GetOperandValue(structInstr, 0)
-        MakeUnkn(structOffset, 0)
-        MakeStruct(structOffset, DLL_FUNCTION_CALL_STRUCT_NAME)
-        strOffset = Dword(structOffset)
-        lpDllName = GetString(strOffset, -1, ASCSTR_TERMCHR)
-        MakeUnkn(strOffset, 0)
-        MakeStr(strOffset, strOffset + len(lpDllName))
-        strOffset = Dword(structOffset + 4)
-        lpFunctionName = GetString(strOffset, -1, ASCSTR_TERMCHR)
-        MakeStr(strOffset, strOffset + len(lpFunctionName))
-        MakeName(structOffset, 'struct{0}'.format(lpFunctionName))
+        structOffset = get_operand_value(structInstr, 0)
+        del_items(structOffset, 0)
+        create_struct(structOffset, -1, DLL_FUNCTION_CALL_STRUCT_NAME)
+        strOffset = get_wide_dword(structOffset)
+        lpDllName = get_strlit_contents(strOffset, -1, STRTYPE_TERMCHR)
+        del_items(strOffset, 0)
+        create_strlit(strOffset, strOffset + len(lpDllName))
+        strOffset = get_wide_dword(structOffset + 4)
+        lpFunctionName = get_strlit_contents(strOffset, -1, STRTYPE_TERMCHR)
+        create_strlit(strOffset, strOffset + len(lpFunctionName))
+        set_name(structOffset, 'struct{0}'.format(lpFunctionName), SN_CHECK)
 
         #   Get sub structure address, apply structure, and apply name to it
-        subStructAddr = Dword(structOffset + 0xC)
-        MakeStruct(subStructAddr, HANDLES_STRUCT_NAME)
-        MakeName(subStructAddr, 'subStruct{0}'.format(lpFunctionName))
+        subStructAddr = get_wide_dword(structOffset + 0xC)
+        create_struct(subStructAddr, -1, HANDLES_STRUCT_NAME)
+        set_name(subStructAddr, 'subStruct{0}'.format(lpFunctionName), SN_CHECK)
 
         #   Check if a function is already defined
-        if '' == GetFunctionName(structInstr):
-            print '\t[+] Function was not defined, creating function ...'
+        if '' == get_func_name(structInstr):
+            print('\t[+] Function was not defined, creating function ...')
             defineFunction(structInstr)
 
         #   Redefine function name to something more descriptive
         lpFnName = '{0}_wrapper'.format(lpFunctionName)
-        fnAddress = idaapi.get_func(structInstr).startEA
-        if not MakeName(fnAddress, lpFnName):
-            print '\t[!] Error: Failed to set function name'
+        fnAddress = idaapi.get_func(structInstr).start_ea
+        if not set_name(fnAddress, lpFnName, SN_CHECK):
+            print('\t[!] Error: Failed to set function name')
         else:
-            print '\t[+] Function "{0}" set at 0x{1:x}'.format(lpFnName,
-                    fnAddress)
-            MakeName(GetOperandValue(fnAddress, 1),
-                        'fn{0}'.format(lpFunctionName))
+            print('\t[+] Function "{0}" set at 0x{1:x}'.format(lpFnName,
+                    fnAddress))
+            set_name(GetOperandValue(fnAddress, 1),
+                        'fn{0}'.format(lpFunctionName), SN_CHECK)
 
         #   Add API to dynamically loaded API
         if lpDllName not in dynamicAPI:
@@ -169,5 +175,5 @@ for xref in idautils.CodeRefsTo(LocByName('DllFunctionCall'), 1):
             dynamicAPI[lpDllName].append(lpFunctionName)
             loadAPI += 1
 
-print 'Printing dynamically loaded API ({0} total)...'.format(loadAPI)
+print('Printing dynamically loaded API ({0} total)...'.format(loadAPI))
 printAPI(dynamicAPI)
