@@ -3,6 +3,7 @@
 #   Copyright (C) 2014  Cisco Systems, Inc./SourceFire, Inc.
 #
 #   Author: Angel M. Villegas (anvilleg [at] sourcefire [dot] com)
+#           Frederick W Sell (frsell [at] cisco [dot] com)
 #
 #   This program is free software; you can redistribute it and/or modify
 #   it under the terms of the GNU General Public License as published by
@@ -18,7 +19,7 @@
 #   with this program; if not, write to the Free Software Foundation, Inc.,
 #   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-#   Last Modified: August 8, 2014
+#   Last Modified: July 29, 2022
 #   Description:
 #       IDA Python script that locates all references to DllFunctionCall,
 #       creates structures, applies structures to the argument provided to
@@ -54,11 +55,6 @@
 
 import idaapi
 import idautils
-import ida_struct
-import idc
-import ida_bytes
-import ida_nalt
-import ida_funcs
 
 #   Print out dynamically loaded API
 def printAPI(data):
@@ -95,22 +91,21 @@ def defineFunction(ea):
 
 def createDllFunctionCallStruct():
     #   Create DllFunctionCall argument sub structure
-    subStructId = idc.add_struc(-1, HANDLES_STRUCT_NAME, 0)
-    idc.add_struc_member(subStructId, 'hModule', 0x4, FF_DWORD | FF_DATA, -1, 4)
-    idc.add_struc_member(subStructId, 'fnAddress', 0x8, FF_DWORD | FF_DATA, -1, 4)
+    subStructId = add_struc(-1, HANDLES_STRUCT_NAME, 0)
+    add_struc_member(subStructId, 'hModule', 0x4, FF_DWORD | FF_DATA, -1, 4)
+    add_struc_member(subStructId, 'fnAddress', 0x8, FF_DWORD | FF_DATA, -1, 4)
 
     #   Create DllFunctionCall argument structure
-    structId = idc.add_struc(-1, DLL_FUNCTION_CALL_STRUCT_NAME, 0)
-    idc.add_struc_member(structId, 'lpDllName', 0x0, FF_DWORD | FF_0OFF | FF_DATA,
+    structId = add_struc(-1, DLL_FUNCTION_CALL_STRUCT_NAME, 0)
+    add_struc_member(structId, 'lpDllName', 0x0, FF_DWORD | FF_0OFF | FF_DATA,
                     -1, 4)
-    idc.add_struc_member(structId, 'lpExportName', 0x4, FF_DWORD | FF_0OFF | FF_DATA,
+    add_struc_member(structId, 'lpExportName', 0x4, FF_DWORD | FF_0OFF | FF_DATA,
                     -1, 4)
-    idc.add_struc_member(structId, 'sizeOfExportName', 0xA, FF_BYTE | FF_DATA, -1, 1)
-    idc.add_struc_member(structId, 'ptrHandles', 0xC, FF_DWORD | FF_0OFF | FF_DATA, -1, 4)
+    add_struc_member(structId, 'sizeOfExportName', 0xA, FF_BYTE | FF_DATA, -1, 1)
+    add_struc_member(structId, 'ptrHandles', 0xC, FF_DWORD | FF_0OFF | FF_DATA, -1, 4)
 
 
 DLL_FUNCTION_CALL_STRUCT_NAME = 'DllFunctionCallStruct'
-ida_bytes.FF_DWORD
 HANDLES_STRUCT_NAME = 'DynamicHandles'
 dynamicAPI = {}
 loadAPI = 0
@@ -118,13 +113,13 @@ loadAPI = 0
 print("Starting...")
 
 #   Check if struct exists, if not, create it
-structId = ida_struct.get_struc_id(DLL_FUNCTION_CALL_STRUCT_NAME)
+structId = get_struc_id(DLL_FUNCTION_CALL_STRUCT_NAME)
 if BADADDR == structId:
     print('\t[+] Structure "{0}" does not exist, creating structure...'.format(
             DLL_FUNCTION_CALL_STRUCT_NAME))
     structId = createDllFunctionCallStruct()
 
-for xref in idautils.CodeRefsTo(get_name_ea_simple('DllFunctionCall'), 1):
+for xref in CodeRefsTo(get_name_ea_simple('DllFunctionCall'), 1):
     instr =  xref
     prevInstr = DecodePreviousInstruction(xref).ea
     structInstr = DecodePreviousInstruction(prevInstr).ea
