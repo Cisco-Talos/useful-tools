@@ -53,122 +53,193 @@
 #
 ################################################################################
 
+# Adapted from vb_DllFunctionCall.py (Cisco Talos, GPLv2+) for IDA 9.x / Python 3
+# Locates references to DllFunctionCall (VB6), applies the structures,
+# renames the wrappers, and displays the list of dynamically loaded APIs.
+
+import re
 import idaapi
 import idautils
+import idc
+import ida_bytes
+import ida_funcs
+import ida_name
+import ida_nalt
+import ida_typeinf
 
-#   Print out dynamically loaded API
-def printAPI(data):
-    formatStr = "{0:25} {1}"
-    for dll in sorted(data.keys()):
+DLL_STRUCT = 'DllFunctionCallStruct'
+HANDLES_STRUCT = 'DynamicHandles'
+
+# Base 32 bits (binaire VB6 x86) : les pointeurs font 4 octets.
+TYPE_DECLS = """
+struct DynamicHandles {
+    unsigned int reserved;      // 0x00
+    void *hModule;              // 0x04
+    void *fnAddress;            // 0x08
+};
+
+struct DllFunctionCallStruct {
+    char *lpDllName;            // 0x00
+    char *lpExportName;         // 0x04
+    unsigned __int16 ordinal;   // 0x08
+    unsigned __int8 sizeOfExportName; // 0x0A
+    unsigned __int8 pad;        // 0x0B
+    struct DynamicHandles *ptrHandles; // 0x0C
+};
+"""
+
+NAME_FLAGS = idc.SN_CHECK | ida_name.SN_FORCE
+
+
+def safe(name):
+    return re.sub(r'[^A-Za-z0-9_]', '_', name)
+
+
+def get_tinfo(name):
+    tif = ida_typeinf.tinfo_t()
+    if tif.get_named_type(ida_typeinf.get_idati(), name):
+        return tif
+    return None
+
+
+def ensure_types():
+    t1, t2 = get_tinfo(HANDLES_STRUCT), get_tinfo(DLL_STRUCT)
+    if t1 and t2:
+        if t1.get_size() == 0xC and t2.get_size() == 0x10:
+            return True
+        print('\t[!] Types existants avec une taille inattendue '
+              '(supprimez-les dans Local Types puis relancez)')
+        return False
+    print('\t[+] Création des structures...')
+    errors = idc.parse_decls(TYPE_DECLS, idc.PT_SIL)
+    if errors:
+        print('\t[!] Erreur(s) de parsing des déclarations : {0}'.format(errors))
+        return False
+    return bool(get_tinfo(HANDLES_STRUCT) and get_tinfo(DLL_STRUCT))
+
+
+def apply_struct(ea, name):
+    tif = get_tinfo(name)
+    ida_bytes.del_items(ea, ida_bytes.DELIT_SIMPLE, tif.get_size())
+    return ida_typeinf.apply_tinfo(ea, tif, ida_typeinf.TINFO_DEFINITE)
+
+
+def read_cstr(ea):
+    """Lit une chaîne C, la définit dans l'IDB et la renvoie en str."""
+    if ea in (0, idc.BADADDR) or not ida_bytes.is_loaded(ea):
+        return None
+    raw = ida_bytes.get_strlit_contents(ea, -1, ida_nalt.STRTYPE_C)
+    if not raw:
+        return None
+    ida_bytes.del_items(ea, ida_bytes.DELIT_SIMPLE, len(raw) + 1)
+    ida_bytes.create_strlit(ea, 0, ida_nalt.STRTYPE_C)
+    return raw.decode('ascii', errors='replace')
+
+
+def prev_ea(ea):
+    insn = idautils.DecodePreviousInstruction(ea)
+    return insn.ea if insn else idc.BADADDR
+
+
+def define_function(ea):
+    # Attendu :
+    #   mov eax, dword_ZZZZ / or eax, eax / jz loc_X / jmp eax
+    # loc_X: push YYYY / mov eax, offset DllFunctionCall / call eax / jmp eax
+    jmp_i = prev_ea(ea)
+    jz_i = prev_ea(jmp_i) if jmp_i != idc.BADADDR else idc.BADADDR
+    or_i = prev_ea(jz_i) if jz_i != idc.BADADDR else idc.BADADDR
+    mov_i = prev_ea(or_i) if or_i != idc.BADADDR else idc.BADADDR
+    if idc.BADADDR in (jmp_i, jz_i, or_i, mov_i):
+        print('\t[!] Impossible de remonter jusqu\'au début de la fonction')
+        return
+    if (idc.print_insn_mnem(jmp_i) != 'jmp' or idc.print_insn_mnem(jz_i) != 'jz'
+            or idc.print_insn_mnem(or_i) != 'or'
+            or idc.print_insn_mnem(mov_i) != 'mov'):
+        print('\t[!] Motif de fonction inattendu à 0x{0:x}'.format(mov_i))
+    if not ida_funcs.add_func(mov_i):
+        print('\t[!] Impossible de définir la fonction à 0x{0:x}'.format(mov_i))
+
+
+def print_api(data):
+    fmt = '{0:25} {1}'
+    for dll in sorted(data):
         for fn in sorted(data[dll]):
-            print(formatStr.format(str(dll), str(fn)))
-
-#   Find the start of the function
-#   Expects ea to be the address of loc_XXXXXX
-def defineFunction(ea):
-    #   Function follows the format:
-    #       mov     eax, dword_ZZZZZZZZ
-    #       or      eax, eax
-    #       jz      short loc_XXXXXXXX
-    #       jmp     eax
-    # loc_XXXXXX:
-    #       push    YYYYYYYYh
-    #       mov     eax, offset DllFunctionCall
-    #       call    eax ; DllFunctionCall
-    #       jmp     eax
-
-    jmpInstr = DecodePreviousInstruction(ea).ea
-    jzInstr = DecodePreviousInstruction(jmpInstr).ea
-    orInstr = DecodePreviousInstruction(jzInstr).ea
-    movInstr = DecodePreviousInstruction(orInstr).ea
-    if (print_insn_mnem(jmpInstr) != 'jmp') and (print_insn_mnem(jzInstr) != 'jz') and \
-        (print_insn_mnem(orInstr) != 'or') and (print_insn_mnem(movInstr) != 'mov'):
-        print('\t[!] Error: Unable to find function start address')
-
-    if 0 == add_func(movInstr):
-        print('\t[!] Error: Unable to define function at 0x{0:h}'.format(movInstr))
+            print(fmt.format(dll, fn))
 
 
-def createDllFunctionCallStruct():
-    #   Create DllFunctionCall argument sub structure
-    subStructId = add_struc(-1, HANDLES_STRUCT_NAME, 0)
-    add_struc_member(subStructId, 'hModule', 0x4, FF_DWORD | FF_DATA, -1, 4)
-    add_struc_member(subStructId, 'fnAddress', 0x8, FF_DWORD | FF_DATA, -1, 4)
+def main():
+    print('Starting...')
+    if not ensure_types():
+        return
 
-    #   Create DllFunctionCall argument structure
-    structId = add_struc(-1, DLL_FUNCTION_CALL_STRUCT_NAME, 0)
-    add_struc_member(structId, 'lpDllName', 0x0, FF_DWORD | FF_0OFF | FF_DATA,
-                    -1, 4)
-    add_struc_member(structId, 'lpExportName', 0x4, FF_DWORD | FF_0OFF | FF_DATA,
-                    -1, 4)
-    add_struc_member(structId, 'sizeOfExportName', 0xA, FF_BYTE | FF_DATA, -1, 1)
-    add_struc_member(structId, 'ptrHandles', 0xC, FF_DWORD | FF_0OFF | FF_DATA, -1, 4)
+    target = idc.get_name_ea_simple('DllFunctionCall')
+    if target == idc.BADADDR:
+        print('\t[!] DllFunctionCall introuvable (renommez-la d\'abord)')
+        return
 
+    dynamic_api = {}
+    count = 0
 
-DLL_FUNCTION_CALL_STRUCT_NAME = 'DllFunctionCallStruct'
-HANDLES_STRUCT_NAME = 'DynamicHandles'
-dynamicAPI = {}
-loadAPI = 0
+    for xref in idautils.CodeRefsTo(target, 1):
+        prev_i = prev_ea(xref)
+        if prev_i == idc.BADADDR:
+            continue
+        struct_instr = prev_ea(prev_i)
+        if struct_instr == idc.BADADDR:
+            continue
 
-print("Starting...")
+        # L'instruction doit être : push offset struct
+        if (idc.print_insn_mnem(struct_instr) != 'push'
+                or idc.get_operand_type(struct_instr, 0) != idc.o_imm):
+            continue
 
-#   Check if struct exists, if not, create it
-structId = get_struc_id(DLL_FUNCTION_CALL_STRUCT_NAME)
-if BADADDR == structId:
-    print('\t[+] Structure "{0}" does not exist, creating structure...'.format(
-            DLL_FUNCTION_CALL_STRUCT_NAME))
-    structId = createDllFunctionCallStruct()
+        idc.op_plain_offset(struct_instr, 0, 0)
+        struct_ea = idc.get_operand_value(struct_instr, 0)
 
-for xref in CodeRefsTo(get_name_ea_simple('DllFunctionCall'), 1):
-    instr =  xref
-    prevInstr = DecodePreviousInstruction(xref).ea
-    structInstr = DecodePreviousInstruction(prevInstr).ea
+        apply_struct(struct_ea, DLL_STRUCT)
+        dll_name = read_cstr(ida_bytes.get_dword(struct_ea))
+        fn_name = read_cstr(ida_bytes.get_dword(struct_ea + 4))
 
-    #   The instruction should be push 0x????????
-    if print_insn_mnem(structInstr) == 'push' and get_operand_type(structInstr, 0) == 0x05:
-        #   Set the operand type to an offset
-        op_plain_offset(structInstr, 0, 0)
+        if not dll_name or not fn_name:
+            print('\t[!] 0x{0:x} : export par ordinal ou chaîne illisible, ignoré'
+                  .format(struct_ea))
+            continue
 
-        #   Get struct offset and apply structure to it
-        structOffset = get_operand_value(structInstr, 0)
-        del_items(structOffset, 0)
-        create_struct(structOffset, -1, DLL_FUNCTION_CALL_STRUCT_NAME)
-        strOffset = get_wide_dword(structOffset)
-        lpDllName = get_strlit_contents(strOffset, -1, STRTYPE_TERMCHR)
-        del_items(strOffset, 0)
-        create_strlit(strOffset, strOffset + len(lpDllName))
-        strOffset = get_wide_dword(structOffset + 4)
-        lpFunctionName = get_strlit_contents(strOffset, -1, STRTYPE_TERMCHR)
-        create_strlit(strOffset, strOffset + len(lpFunctionName))
-        set_name(structOffset, 'struct{0}'.format(lpFunctionName), SN_CHECK)
+        base = safe(fn_name)
+        idc.set_name(struct_ea, 'struct_' + base, NAME_FLAGS)
 
-        #   Get sub structure address, apply structure, and apply name to it
-        subStructAddr = get_wide_dword(structOffset + 0xC)
-        create_struct(subStructAddr, -1, HANDLES_STRUCT_NAME)
-        set_name(subStructAddr, 'subStruct{0}'.format(lpFunctionName), SN_CHECK)
+        # Sous-structure (handles)
+        sub_ea = ida_bytes.get_dword(struct_ea + 0xC)
+        if sub_ea and ida_bytes.is_loaded(sub_ea):
+            apply_struct(sub_ea, HANDLES_STRUCT)
+            idc.set_name(sub_ea, 'subStruct_' + base, NAME_FLAGS)
 
-        #   Check if a function is already defined
-        if '' == get_func_name(structInstr):
-            print('\t[+] Function was not defined, creating function ...')
-            defineFunction(structInstr)
+        # Fonction wrapper
+        if not idc.get_func_name(struct_instr):
+            print('\t[+] Fonction non définie, création...')
+            define_function(struct_instr)
 
-        #   Redefine function name to something more descriptive
-        lpFnName = '{0}_wrapper'.format(lpFunctionName)
-        fnAddress = idaapi.get_func(structInstr).start_ea
-        if not set_name(fnAddress, lpFnName, SN_CHECK):
-            print('\t[!] Error: Failed to set function name')
+        func = ida_funcs.get_func(struct_instr)
+        if not func:
+            print('\t[!] Pas de fonction à 0x{0:x}'.format(struct_instr))
         else:
-            print('\t[+] Function "{0}" set at 0x{1:x}'.format(lpFnName,
-                    fnAddress))
-            set_name(GetOperandValue(fnAddress, 1),
-                        'fn{0}'.format(lpFunctionName), SN_CHECK)
+            wrapper_name = base + '_wrapper'
+            if not idc.set_name(func.start_ea, wrapper_name, NAME_FLAGS):
+                print('\t[!] Échec du renommage de la fonction à 0x{0:x}'
+                      .format(func.start_ea))
+            else:
+                print('\t[+] "{0}" à 0x{1:x}'.format(wrapper_name, func.start_ea))
+                ptr_ea = idc.get_operand_value(func.start_ea, 1)
+                if ptr_ea != idc.BADADDR:
+                    idc.set_name(ptr_ea, 'fn_' + base, NAME_FLAGS)
 
-        #   Add API to dynamically loaded API
-        if lpDllName not in dynamicAPI:
-            dynamicAPI[lpDllName] = []
-        if lpFunctionName not in dynamicAPI[lpDllName]:
-            dynamicAPI[lpDllName].append(lpFunctionName)
-            loadAPI += 1
+        lst = dynamic_api.setdefault(dll_name, [])
+        if fn_name not in lst:
+            lst.append(fn_name)
+            count += 1
 
-print('Printing dynamically loaded API ({0} total)...'.format(loadAPI))
-printAPI(dynamicAPI)
+    print('Printing dynamically loaded API ({0} total)...'.format(count))
+    print_api(dynamic_api)
+
+
+main()
